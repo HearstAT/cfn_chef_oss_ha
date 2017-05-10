@@ -1,20 +1,18 @@
-# Backendless Chef Stack
+# Chef OSS HA Chef Stack
 
-Cloudformation Templates to build out a complete Backendless Chef Configuration
-
-**Note:** No longer requires a Cookbook to build.
+Cloudformation Templates to build out a Chef OSS HA Setup w/ AWS Services as Backend
 
 ## Info
 
 -   Builds out customized Chef Server build out without any backends to zone lock your setup
 -   Built to utilize Ubuntu Xenial (For additional image info: [Ubuntu EC2 Images](https://cloud-images.ubuntu.com/locator/ec2/))
--   Allows you to choose versions to install on Chef-Server, Manage, and Reporting (Limited to Xenial Supported versions)
+-   Allows you to choose versions to install on Chef-Server (Limited to Xenial Supported versions)
 -   Builds out a RDS PostgreSQL Database, Version: 9.5.4
 -   Builds out AWS ElasticSearch Domain (Node/Replication Configurable), Version: 2.3
 
 ## Diagram
 
-![Alt text](backendless_chef.png?raw=true "Overview Diagram")
+![Alt text](oss_ha_chef.png?raw=true "Overview Diagram")
 
 ## Requirements
 
@@ -34,14 +32,11 @@ Info you need to find/decide on to successfully build our Stack
 -   Required Params to Fill Out
     -   HostedZone; A Domain Setup in Route53 [Guide](http://docs.aws.amazon.com/Route53/latest/DeveloperGuide/CreatingHostedZone.html)
     -   SSLCertificateARN; See the [SSL Setup](#ssl-setup) Section
-    -   LicenseCount; How many license you have purchased from Chef. (25 is the default, this is the amount of default "free" nodes you get starting off)
     -   DBUser; Username for DB (Required for Existing or New Setups)
     -   DBPassword; Password for DB (Required for Existing or New Setups)
 -   Required Params to Select
     -   ChefSubdomain; See [Blue/Green](#bluegreen-deployment) Section for more Info
     -   ChefServerVersion; Select Version to install, versions listed are the only ones that have packages for Ubuntu Xenial
-    -   ManageVersion; Select Version to install, versions listed are the only ones that have packages for Ubuntu Xenial
-    -   ReportingVersion; Select Version to install, versions list are the only ones that support ElasticSearch
     -   DBMultiAZ; Select if you want the DB setup in Multiple Availability Zones
     -   ElasticInstanceType; Default is t2.small.elasticsearch, good for small or testing situations
     -   KeyName; Select SSH Key
@@ -194,7 +189,7 @@ We utilize New Relic as our APM and System Monitor, this is setup only if condit
 
 **If New Relic License Key Param is Filled Out**
 
-Installed via [newrelic.sh](newrelic.sh)
+Installed via UserData
 
 -   What is Enabled:
     -   New Relic APM (Gem Packaged with Chef)
@@ -206,7 +201,7 @@ We utilize Sumologic as our Log Management and Analytics platform, this is setup
 
 **If Sumologic Access Key Param is Filled Out**
 
-Installed via [sumologic.sh](sumologic.sh)
+Installed via UserData
 
 -   What is Enabled:
     -   Sumologic Collector
@@ -218,7 +213,6 @@ Installed via [sumologic.sh](sumologic.sh)
 This is where it gets ugly, a lot of this has been reported and hoping to remove these.
 
 -   Chef Server
-    -   Chef Reporting; currently not supported for Xenial and there is a sed command to swap out the service which is setting this up (upstart vs systemd) so it will install and function.
     -   Chef Server Upgrade; Partybus or more specifically the private chef cookbook does not support the external database configurations. There is a manual replacement inside the userdata swapping out the ERB in the private chef cookbook so it's configured correctly.
     -   Chef NGINX Servername; you cannot set multiple server names via the `nginx['server_name']` option in chef-server.rb or it will create a private cert (regardless is using a ssl setup or not) with the spaces in it and NGINX cannot parse the path. So I am manually setting the cert locations and copying the cert/key in question into a more appropriately named one.
 -   ElasticSearch
@@ -248,23 +242,24 @@ This is where it gets ugly, a lot of this has been reported and hoping to remove
 Special Thanks to [Irving Popovetsky](https://github.com/irvingpop) for answering all my questions and being patient with me!
 
 ## License
-Copyright 2016, Hearst Automation Team
+MIT License
 
-Permission is hereby granted, free of charge, to any person obtaining
-a copy of this software and associated documentation files (the
-"Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
+Copyright (c) 2017 Hearst Automation Team
 
-The above copyright notice and this permission notice shall be
-included in all copies or substantial portions of the Software.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
-LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
-WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
