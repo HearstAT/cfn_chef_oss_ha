@@ -300,7 +300,7 @@ Resources:
             # If not Bootstrap or Existing DB, Pull Bootstrap Secrets
             ##########################################################
 
-            mkdir -p /etc/chef-manage/ /etc/opscode/ /etc/opscode-reporting/
+            mkdir -p /etc/opscode/
 
             if [ -z "${!BOOTSTRAP_TAGS}" ] || [ -n "${DBSnapShot}" ] || [ -n "${DBURL}" ]; then
               echo "[INFO] configuring this node as a regular Chef frontend"
@@ -308,7 +308,6 @@ Resources:
               aws s3 cp s3://${BucketName}/etc_opscode/private-chef-secrets.json /etc/opscode || error_exit "Failed to sync existing Chef Secrets"
               aws s3 cp s3://${BucketName}/etc_opscode/webui_priv.pem /etc/opscode || error_exit "Failed to sync existing WebUI Key"
               aws s3 cp s3://${BucketName}/etc_opscode/webui_pub.pem /etc/opscode || error_exit "Failed to sync existing WebUI Cert"
-              aws s3 sync s3://${BucketName}/etc_opscode_reporting /etc/opscode-reporting || error_exit "Failed to sync bootstrap reporting directory"
               mkdir -p /var/opt/opscode/upgrades || error_exit "Failed to create upgrades directory"
               touch /var/opt/opscode/bootstrapped || error_exit "Failed to create bootstrap file"
               aws s3 cp s3://${BucketName}/migration-level /var/opt/opscode/upgrades/ || error_exit "Failed sync migration-level"
@@ -398,9 +397,8 @@ Resources:
             nginx['ssl_certificate_key'] = '/var/opt/opscode/nginx/ca/${ChefSubdomain}.${HostedZone}.key'
             nginx['ssl_certificate'] = '/var/opt/opscode/nginx/ca/${ChefSubdomain}.${HostedZone}.crt'
             nginx['server_name'] = '${ChefSubdomain}.${HostedZone} chef.${HostedZone}'
-            license['nodes'] = ${LicenseCount}
             postgresql['external'] = true
-            postgresql['vip'] = '${DBENDPOINT}'
+            postgresql['vip'] = '${DBURL}'
             postgresql['db_superuser'] = '${DBUser}'
             postgresql['db_superuser_password'] = '${DBPassword}'
             oc_chef_authz['http_init_count'] = 100
@@ -419,7 +417,7 @@ Resources:
             opscode_erchef['search_provider'] = 'elasticsearch'
             opscode_erchef['search_queue_mode'] = 'batch'
             opscode_solr4['external'] = true
-            opscode_solr4['external_url'] = 'http://${PROXYIP}'
+            opscode_solr4['external_url'] = 'http://${ProxyIP}'
             bookshelf['storage_type'] = :sql
             rabbitmq['enable'] = false
             rabbitmq['management_enabled'] = false
