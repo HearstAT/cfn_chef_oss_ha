@@ -1,0 +1,563 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS HA Chef Server OSS - HA Backendless Chef - Ubuntu Xenial Based
+
+Parameters:
+  ## Domain Configuration
+  HostedZone:
+    Type: String
+    Default: domain.com
+    Description: must match a route53 hosted domain/zone
+
+  ## Re-Deploy Configuration
+  RunUpgrade:
+    Type: String
+    Default: ''
+    Description: Select True/False if you wish to run chef upgrade procedures
+
+  BackupFilename:
+    Type: String
+    Default: ''
+    Description: Enter the backup file to restore (e.g.; backup_06_Dec_16.tar)
+
+  ExistingBucketName:
+    Type: String
+    Default: ''
+    Description: Enter a Existing Bucket Name to to use (Leave blank to create new)
+
+  ## Chef Configuration
+  ChefSubdomain:
+    Type: String
+    Default: ''
+    Description: subdomain/prefix that is combined with the hosted zone entered
+
+  ChefServerVersion:
+    Type: String
+    Default: ''
+    Description: Choose Version of Chef Server to Install (All Supported/Tested Versions listed)
+
+  ## Database Configuration
+  DBUser:
+    Type: String
+    Default: ''
+    Description: Enter DB User Name (Required)
+
+  DBPassword:
+    Type: String
+    NoEcho: 'true'
+    Default: ''
+    Description: Enter DB Password (Required)
+
+  DBURL:
+    Type: String
+    Default: ''
+    Description: Enter DB URL or VIP (External/Existing Only - Leave Empty to ignore)
+
+  ## Mail Configuration
+  MailHost:
+    Type: String
+    Default: ''
+    Description: (Optional) Enter Mail Host; e.g.; smtp.mailgun.org
+
+  MailPort:
+    Type: String
+    Default: ''
+    Description: (Optional) Enter Port for Mail Host; e.g.; 587
+
+  MailCreds:
+    Type: String
+    NoEcho: 'true'
+    Default: ''
+    Description: (Optional) Enter Mail Credentials (e.g.; $username:$password)
+
+  ## New Relic Configuration
+  NewRelicAppName:
+    Type: String
+    Default: ''
+    Description: (Optional) Enter New Relic Application Name; e.g.; chef_ha_stack
+
+  NewRelicLicense:
+    Type: String
+    NoEcho: 'true'
+    Default: ''
+    Description: (Optional) Enter New Relic License Key
+
+  ## Sumologic Configuration
+  SumologicAccessID:
+    Type: String
+    NoEcho: 'true'
+    Default: ''
+    Description: (Optional) Enter Sumologic Access ID
+
+  SumologicAccessKey:
+    Type: String
+    NoEcho: 'true'
+    Default: ''
+    Description: (Optional) Enter Sumologic Access Key
+
+  ## Instance/Network Configuration
+  Subnets:
+    Description: List of Created Subnets
+    Type: CommaDelimitedList
+
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: String
+
+  SSHSecurityGroup:
+    Description: Select Security Group for SSH Access
+    Type: String
+    Default: ''
+
+  ChefInstanceType:
+    Type: String
+    Default: ''
+
+  ProxyIP:
+    Type: String
+    Default: ''
+
+Resources:
+
+###############################################################################
+# Autoscaling
+###############################################################################
+
+  BootstrapAutoScaleGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - ProxyInstance
+    Properties:
+      AvailabilityZones:
+        - !Select [ 0, !GetAZs "" ]
+        - !Select [ 1, !GetAZs "" ]
+        - !Select [ 2, !GetAZs "" ]
+      VPCZoneIdentifier:
+        - !Select [ 0, !Ref Subnets ]
+        - !Select [ 1, !Ref Subnets ]
+        - !Select [ 2, !Ref Subnets ]
+      LaunchConfigurationName: !Ref ServerLaunchConfig
+      LoadBalancerNames:
+      - !Ref LoadBalancer
+      MaxSize: '1'
+      MinSize: '1'
+      Tags:
+      - Key: Name
+        Value: !Sub bootstrap-frontend-${AWS::StackName}
+        PropagateAtLaunch: true
+
+  FrontendAutoScaleGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - BootstrapAutoScaleGroup
+      - BootstrapWaitCondition
+    Properties:
+      AvailabilityZones:
+        - !Select [ 0, !GetAZs "" ]
+        - !Select [ 1, !GetAZs "" ]
+        - !Select [ 2, !GetAZs "" ]
+      VPCZoneIdentifier:
+        - !Select [ 0, !Ref Subnets ]
+        - !Select [ 1, !Ref Subnets ]
+        - !Select [ 2, !Ref Subnets ]
+      LaunchConfigurationName: !Ref ServerLaunchConfig
+      LoadBalancerNames:
+        - !Ref PrimaryElasticLoadBalancer
+      MaxSize: !Ref ChefInstanceMaxCount
+      MinSize: !Ref ChefInstanceMinCount
+      Tags:
+        - Key: Name
+          Value: !Sub frontend-${AWS::StackName}
+          PropagateAtLaunch: true
+
+  FrontendAutoScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref FrontendAutoScaleGroup
+      Cooldown: 60
+      ScalingAdjustment: 1
+
+  FrontendAutoScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref FrontendAutoScaleGroup
+      Cooldown: 60
+      ScalingAdjustment: -1
+
+###############################################################################
+# Instance Launch Configuration
+###############################################################################
+
+  ServerLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref ImageID
+      AssociatePublicIpAddress: true
+      EbsOptimized: true
+      InstanceType: !Ref ChefInstanceType
+      SecurityGroups:
+        - !Ref FrontendSecurityGroup
+        - !Ref SSHSecurityGroup
+      KeyName: !Ref KeyName
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp2
+            DeleteOnTermination: true
+      IamInstanceProfile: !Ref ChefInstanceProfile
+      UserData:
+        "Fn::Base64":
+          "Fn::Sub": |
+            #!/bin/bash -xev
+
+            ##########################################################
+            # Upgrade OS & Install Dependencies
+            ##########################################################
+
+            apt-get update && apt-get -y upgrade
+            apt-get install -y wget curl python-setuptools python-pip git
+
+            ##########################################################
+            # Install AWS & CFN Tools
+            ##########################################################
+
+            if [ -z $(command -v cfn-signal) ]; then
+                easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
+            fi
+
+            if [ -z $(command -v aws) ]; then
+              sleep 5
+              pip install awscli
+            fi
+
+            ##########################################################
+            # Global Variable Set & Helper Set
+            ##########################################################
+
+            export DEBIAN_FRONTEND=noninteractive
+            export INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+            export BOOTSTRAP_TAGS=$(aws ec2 describe-tags --region ${AWS::Region} --filter "Name=resource-id,Values=$INSTANCE_ID" --output=text | grep BootstrapAutoScaleGroup)
+            export STACKNAME='${AWS::StackName}'
+            export HOSTNAME="${ChefSubdomain}-fe-${!INSTANCE_ID}.${HostedZone}"
+
+            if [ -n "${!BOOTSTRAP_TAGS}" ]; then
+              export WAITHANDLE='${BootstrapWaitHandle}'
+            else
+              export WAITHANDLE='${FrontendWaitHandle}'
+            fi
+
+            error_exit()
+            {
+              cfn-signal -e 1 -r "$1" "${!WAITHANDLE}"
+              exit 1
+            }
+
+            export -f error_exit
+
+            ##########################################################
+            # Set Hostname and Hosts File
+            ##########################################################
+
+            hostname ${!HOSTNAME} || error_exit 'Failed to set hostname'
+            echo "${!HOSTNAME}" > /etc/hostname || error_exit 'Failed to set hostname file'
+
+            cat > '/etc/hosts' << EOF
+            127.0.0.1 ${!HOSTNAME} ${!HOSTNAME%%.*} localhost
+            ::1 localhost6.localdomain6 localhost6
+            EOF
+
+            ##########################################################
+            # Setup Postfix as Chef Mail Relay
+            ##########################################################
+
+            debconf-set-selections <<< "postfix postfix/main_mailer_type select Satellite system" || error_exit "Failed to set Postfix Option: Mailer Type"
+            debconf-set-selections <<< "postfix postfix/mailname string chef.${HostedZone}" || error_exit "Failed to set Postfix Option: Mail Name"
+            debconf-set-selections <<< "postfix postfix/relayhost string ${MailHost}" || error_exit "Failed to set Postfix Option: Relay Host"
+
+            mkdir -p /etc/postfix/
+
+            cat > '/etc/postfix/sasl_passwd' << EOF
+            ${MailHost} ${MailCreds}
+            EOF
+
+            apt-get install -y postfix sasl2-bin || error_exit "Failed to install Postfix"
+            chmod 600 /etc/postfix/sasl_passwd && postmap /etc/postfix/sasl_passwd || error_exit "Failed to Chmod & Postmap sasl_passwd"
+
+            cat >> '/etc/postfix/main.cf' << EOF
+            smtp_sasl_auth_enable = yes
+            smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
+            smtp_sasl_security_options = noanonymous
+            smtp_sasl_tls_security_options = noanonymous
+            smtp_sasl_mechanism_filter = AUTH LOGIN
+            EOF
+
+            systemctl restart postfix || error_exit "Failed to restart Postfix"
+
+            ##########################################################
+            # If not Bootstrap or Existing DB, Pull Bootstrap Secrets
+            ##########################################################
+
+            mkdir -p /etc/chef-manage/ /etc/opscode/ /etc/opscode-reporting/
+
+            if [ -z "${!BOOTSTRAP_TAGS}" ] || [ -n "${DBSnapShot}" ] || [ -n "${DBURL}" ]; then
+              echo "[INFO] configuring this node as a regular Chef frontend"
+              aws s3 cp s3://${BucketName}/etc_opscode/pivotal.pem /etc/opscode || error_exit "Failed to sync existing Pivotal Key"
+              aws s3 cp s3://${BucketName}/etc_opscode/private-chef-secrets.json /etc/opscode || error_exit "Failed to sync existing Chef Secrets"
+              aws s3 cp s3://${BucketName}/etc_opscode/webui_priv.pem /etc/opscode || error_exit "Failed to sync existing WebUI Key"
+              aws s3 cp s3://${BucketName}/etc_opscode/webui_pub.pem /etc/opscode || error_exit "Failed to sync existing WebUI Cert"
+              aws s3 sync s3://${BucketName}/etc_opscode_reporting /etc/opscode-reporting || error_exit "Failed to sync bootstrap reporting directory"
+              mkdir -p /var/opt/opscode/upgrades || error_exit "Failed to create upgrades directory"
+              touch /var/opt/opscode/bootstrapped || error_exit "Failed to create bootstrap file"
+              aws s3 cp s3://${BucketName}/migration-level /var/opt/opscode/upgrades/ || error_exit "Failed sync migration-level"
+            fi
+
+            if [ -n "${!BOOTSTRAP_TAGS}" ]; then
+            cat > '/tmp/index_create.json' << EOF
+              {
+                "settings": {
+                  "analysis": {
+                    "analyzer": {
+                      "default": {
+                        "type": "whitespace"
+                      }
+                    }
+                  },
+                  "number_of_shards": ${ElasticInstanceCount},
+                  "number_of_replicas": ${ElasticReplicaCount}
+                },
+                "mappings": {
+                  "object": {
+                    "_source": {
+                      "enabled": false
+                    },
+                    "_all": {
+                      "enabled": false
+                    },
+                    "properties": {
+                      "X_CHEF_database_CHEF_X": {
+                        "type": "string",
+                        "index": "not_analyzed",
+                        "norms": {
+                          "enabled": false
+                        }
+                      },
+                      "X_CHEF_type_CHEF_X": {
+                        "type": "string",
+                        "index": "not_analyzed",
+                        "norms": {
+                          "enabled": false
+                        }
+                      },
+                      "X_CHEF_id_CHEF_X": {
+                        "type": "string",
+                        "index": "not_analyzed",
+                        "norms": {
+                          "enabled": false
+                        }
+                      },
+                      "data_bag": {
+                        "type": "string",
+                        "index": "not_analyzed",
+                        "norms": {
+                          "enabled": false
+                        }
+                      },
+                      "content": {
+                        "type": "string",
+                        "index": "analyzed"
+                      }
+                    }
+                  }
+                }
+              }
+            EOF
+
+              echo "[INFO] initializing ElasticSearch index manually"
+              curl -XPUT http://${PROXYIP}/chef/ -d @/tmp/index_create.json || error_exit "Failed to Create ElasticSearch Index Manually"
+            fi
+
+            ##########################################################
+            # Install Chef Server with Manage and Reporting
+            ##########################################################
+
+            CHEFSERVER=$(mktemp); wget "https://packages.chef.io/stable/ubuntu/16.04/chef-server-core_${ChefServerVersion}-1_amd64.deb" -qO $CHEFSERVER && dpkg -i $CHEFSERVER; rm $CHEFSERVER || error_exit "Failed to install Chef Server"
+
+            ##########################################################
+            # Only write config changes on Bootstrap
+            ##########################################################
+
+            cat > '/etc/opscode/chef-server.rb' << EOF
+            from_email 'chef@chef.${HostedZone}'
+            notification_email 'chef@chef.${HostedZone}'
+            api_fqdn '${ChefSubdomain}.${HostedZone}'.downcase
+            fqdn "${!HOSTNAME}"
+            nginx['enable_non_ssl'] = true
+            nginx['ssl_certificate_key'] = '/var/opt/opscode/nginx/ca/${ChefSubdomain}.${HostedZone}.key'
+            nginx['ssl_certificate'] = '/var/opt/opscode/nginx/ca/${ChefSubdomain}.${HostedZone}.crt'
+            nginx['server_name'] = '${ChefSubdomain}.${HostedZone} chef.${HostedZone}'
+            license['nodes'] = ${LicenseCount}
+            postgresql['external'] = true
+            postgresql['vip'] = '${DBENDPOINT}'
+            postgresql['db_superuser'] = '${DBUser}'
+            postgresql['db_superuser_password'] = '${DBPassword}'
+            oc_chef_authz['http_init_count'] = 100
+            oc_chef_authz['http_queue_max'] = 200
+            opscode_erchef['authz_pooler_timeout'] = 2000
+            oc_bifrost['db_pool_init'] = 10
+            oc_bifrost['db_pool_max'] = 20
+            oc_bifrost['db_pool_queue_max'] = 40
+            opscode_erchef['depsolver_worker_count'] = 4
+            opscode_erchef['depsolver_timeout'] = 20000
+            opscode_erchef['db_pool_init'] = 10
+            opscode_erchef['db_pool_max'] = 20
+            opscode_erchef['db_pool_queue_max'] = 40
+            opscode_erchef['nginx_bookshelf_caching'] = :on
+            opscode_erchef['s3_url_expiry_window_size'] = '100%'
+            opscode_erchef['search_provider'] = 'elasticsearch'
+            opscode_erchef['search_queue_mode'] = 'batch'
+            opscode_solr4['external'] = true
+            opscode_solr4['external_url'] = 'http://${PROXYIP}'
+            bookshelf['storage_type'] = :sql
+            rabbitmq['enable'] = false
+            rabbitmq['management_enabled'] = false
+            rabbitmq['queue_length_monitor_enabled'] = false
+            opscode_expander['enable'] = false
+            dark_launch['actions'] = false
+            EOF
+
+            ##########################################################
+            # Chef Upgrade Work Around
+            ##########################################################
+
+            cat > '/opt/opscode/embedded/cookbooks/private-chef/templates/default/partybus_config.rb.erb' << 'EOF'
+            Partybus.configure do |c|
+              c.database_connection_string    = "${DBENDPOINT}:5432"
+              c.database_migration_directory  = "/opt/opscode/embedded/service/chef-sql-schema/db/migrate"
+              c.partybus_migration_directory  = "/opt/opscode/embedded/upgrades"
+              c.migration_state_file          = "/var/opt/opscode/upgrades/migration-level"
+              c.private_chef_role             = "<%= @node_role %>"
+              c.is_data_master                = <%= @is_data_master %>
+              c.bootstrap_server              = <%= @bootstrap_server %>
+              c.couchdb_data_dir              = "<%= node['private_chef']['couchdb']['data_dir'] %>"
+            end
+            EOF
+
+            ##########################################################
+            # Configure the Chef Server & NGINX Work Around
+            ##########################################################
+
+            chef-server-ctl reconfigure --accept-license || error_exit "Chef Server Reconfigure Failed"
+
+            cp -f /var/opt/opscode/nginx/ca/${ChefSubdomain}.${HostedZone}\ chef.${HostedZone}.key /var/opt/opscode/nginx/ca/${ChefSubdomain}.${HostedZone}.key || error_exit "Failed to copy key for Chef NGINX Workaround"
+            cp -f /var/opt/opscode/nginx/ca/${ChefSubdomain}.${HostedZone}\ chef.${HostedZone}.crt /var/opt/opscode/nginx/ca/${ChefSubdomain}.${HostedZone}.crt || error_exit "Failed to copy cert for Chef NGINX Workaround"
+
+            ##########################################################
+            # If Bootstrap/Master Node, Sync Secrets and Knife.rb
+            ##########################################################
+
+            if [ -n "${!BOOTSTRAP_TAGS}" ]; then
+              echo "[INFO] syncing secrets up to S3"
+              aws s3 sync /etc/opscode s3://${BucketName}/etc_opscode || error_exit "Failed to sync bootstrap opscode directory"
+              aws s3 cp /var/opt/opscode/upgrades/migration-level s3://${BucketName}/ || error_exit "Failed to sync bootstrap migration-level"
+              echo "[INFO] Write knife.rb file and syncing for knife ec restore/backup"
+            cat > '/root/knife.rb' << EOF
+            current_dir = File.dirname(__FILE__)
+            log_level                :info
+            log_location             STDOUT
+            if(File.exist?('/etc/opscode/webui_key.pem'))
+              knife[:webui_key] = "/etc/opscode/webui_key.pem"
+            else
+              knife[:webui_key] = "#{current_dir}/etc_opscode/webui_key.pem"
+            end
+            knife[:with_user_sql] = true
+            knife[:sql_user] = '${DBUser}'
+            knife[:sql_password] = '${DBPassword}'
+            knife[:sql_host] = '${DBENDPOINT}'
+            knife[:chef_server_url] = 'https://${ChefSubdomain}.${HostedZone}'
+            EOF
+              aws s3 cp /root/knife.rb s3://${BucketName}/knife.rb
+            fi
+
+            ##########################################################
+            # Existing Install Options
+            ##########################################################
+
+            if [ -n "${!BOOTSTRAP_TAGS}" ] && [ -n "${BackupFilename}" ]; then
+              echo "Backup Restore Selected, restoring previos knife ec backup"
+              aws s3 sync s3://${BucketName}/chef_ec_backups /tmp/backup_sync || error_exit "Failed to sync backup files from S3"
+              tar -xzf /tmp/backup_sync/${BackupFilename} --strip-components=1 || error_exit "Failed to extract backup"
+              /opt/opscode/embedded/bin/knife ec restore /tmp/backup -s https://${ChefSubdomain}.${HostedZone} --with-user-sql --skip-useracl --sql-host ${DBENDPOINT} || error_exit "Failed to restore Backup"
+            fi
+
+            echo "Existing DB, re-indexing orgs"
+            # Accomplish individually due to issues found with all-orgs flag
+            for org in $(chef-server-ctl org-list); do chef-server-ctl reindex $org; done || error_exit "Failed to re-index orgs"
+
+            # Reconfigure again to ensure to pull any changes during reindex
+            chef-server-ctl reconfigure || error_exit "Chef Server Reconfigure Failed"
+
+            ##########################################################
+            # Upgrade Chef Chef if Selected
+            ##########################################################
+
+            if [ -n "${!BOOTSTRAP_TAGS}" ] && [ "${RunUpgrade}" == 'true' ]; then
+               chef-server-ctl stop || error_exit "Chef Server Restart Failed"
+               chef-server-ctl upgrade || error_exit "Chef Server Restart Failed"
+               chef-server-ctl start || error_exit "Chef Server Restart Failed"
+               chef-server-ctl cleanup || error_exit "Chef Server Restart Failed"
+            fi
+
+            ##########################################################
+            # NewRelic Config if Enabled
+            ##########################################################
+
+            if [ -n "${NewRelicAppName}" ]; then
+
+            fi
+
+            ##########################################################
+            # Sumologic Config if Enabled
+            ##########################################################
+
+            if [ -n "${SumologicAccessID}" ]; then
+
+            fi
+
+            ##########################################################
+            # Restart Chef Server
+            ##########################################################
+
+            chef-server-ctl restart || error_exit "Chef Server Restart Failed"
+
+            ##########################################################
+            # Send Success Signal to CFN Wait Handle
+            ##########################################################
+
+            /usr/local/bin/cfn-signal -e 0 -r 'Server setup complete' "${!WAITHANDLE}"
+
+            ##########################################################
+            # Reboot After Success for all updates made
+            ##########################################################
+
+            reboot
+
+  BootstrapWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+  BootstrapWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: ServerLaunchConfig
+    Properties:
+      Handle: !Ref BootstrapWaitHandle
+      Timeout: 2300
+
+  FrontendWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+  FrontendWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: BootstrapWaitCondition
+    Properties:
+      Handle: !Ref FrontendWaitHandle
+      Timeout: 2300

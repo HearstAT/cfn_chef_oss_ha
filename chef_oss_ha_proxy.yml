@@ -1,0 +1,273 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS HA Chef Server OSS - HA Backendless Chef - Ubuntu Xenial Based
+
+Parameters:
+  ## Domain Configuration
+  HostedZone:
+    Type: String
+    Default: domain.com
+    Description: must match a route53 hosted domain/zone
+
+  ExistingBucketName:
+    Type: String
+    Default: ''
+    Description: Enter a Existing Bucket Name to to use (Leave blank to create new)
+
+  ## New Relic Configuration
+  NewRelicAppName:
+    Type: String
+    Default: ''
+    Description: (Optional) Enter New Relic Application Name; e.g.; chef_ha_stack
+
+  NewRelicLicense:
+    Type: String
+    NoEcho: 'true'
+    Default: ''
+    Description: (Optional) Enter New Relic License Key
+
+  ## Sumologic Configuration
+  SumologicAccessID:
+    Type: String
+    NoEcho: 'true'
+    Default: ''
+    Description: (Optional) Enter Sumologic Access ID
+
+  SumologicAccessKey:
+    Type: String
+    NoEcho: 'true'
+    Default: ''
+    Description: (Optional) Enter Sumologic Access Key
+
+  ## Instance/Network Configuration
+  ESProxyInstanceType:
+    Type: String
+    Default: ''
+
+  Subnets:
+    Description: List of Created Subnets
+    Type: CommaDelimitedList
+
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: String
+    Default: ''
+
+  SSHSecurityGroup:
+    Description: Select Security Group for SSH Access
+    Type: AWS::EC2::SecurityGroup::Id
+    Default: ''
+
+Resources:
+
+###############################################################################
+# Autoscaling
+###############################################################################
+  FrontendAutoScaleGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - BootstrapAutoScaleGroup
+      - BootstrapWaitCondition
+    Properties:
+      AvailabilityZones:
+        - !Select [ 0, !GetAZs "" ]
+        - !Select [ 1, !GetAZs "" ]
+        - !Select [ 2, !GetAZs "" ]
+      VPCZoneIdentifier:
+        - !Ref SubnetA
+        - !Ref SubnetB
+        - !Ref SubnetC
+      LaunchConfigurationName: !Ref ServerLaunchConfig
+      LoadBalancerNames:
+        - !Ref PrimaryElasticLoadBalancer
+      MaxSize: !Ref ChefInstanceMaxCount
+      MinSize: !Ref ChefInstanceMinCount
+      Tags:
+        - Key: Name
+          Value: !Sub frontend-${AWS::StackName}
+          PropagateAtLaunch: true
+
+  FrontendAutoScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref FrontendAutoScaleGroup
+      Cooldown: 60
+      ScalingAdjustment: 1
+
+  FrontendAutoScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref FrontendAutoScaleGroup
+      Cooldown: 60
+      ScalingAdjustment: -1
+
+###############################################################################
+# Elastic Search Proxy
+###############################################################################
+
+  ProxyInstance:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - ElasticsearchDomain
+    Properties:
+      ImageId: !FindInMap [ RegionMap, !Ref "AWS::Region", HVM64 ]
+      InstanceType: !Ref ESProxyInstanceType
+      KeyName: !Ref KeyName
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref ProxySecurityGroup
+            - !Ref SSHSecurityGroup
+          SubnetId:
+            Ref: SubnetA
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp2
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Sub es-proxy-${AWS::StackName}
+      UserData:
+        "Fn::Base64":
+          "Fn::Sub":
+            - |
+              #!/bin/bash -xev
+
+              ##########################################################
+              # Global Variable Set
+              ##########################################################
+
+              export DEBIAN_FRONTEND=noninteractive
+              export INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+              export STACKNAME='${AWS::StackName}'
+              export HOSTNAME="${ChefSubdomain}-proxy-${!INSTANCE_ID}.${HostedZone}"
+
+              ##########################################################
+              # Upgrade OS & Install Dependencies
+              ##########################################################
+
+              apt-get update && apt-get -y upgrade
+              apt-get install -y wget curl python-setuptools python-pip git
+
+              ##########################################################
+              # Install cfn bootstraping tools
+              ##########################################################
+
+              if [ -z $(command -v cfn-signal) ]; then
+                  easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
+              fi
+
+              ##########################################################
+              # Helper function to set wait timer
+              ##########################################################
+
+              error_exit()
+              {
+                cfn-signal -e 1 -r "$1" "${ProxyWaitHandle}"
+                exit 1
+              }
+
+              export -f error_exit
+
+              ##########################################################
+              # Set Hostname and Hosts File
+              ##########################################################
+
+              hostname ${!HOSTNAME} || error_exit 'Failed to set hostname'
+              echo "${!HOSTNAME}" > /etc/hostname || error_exit 'Failed to set hostname file'
+
+              cat > '/etc/hosts' << EOF
+              127.0.0.1 ${!HOSTNAME} ${!HOSTNAME%%.*} localhost
+              ::1 localhost6.localdomain6 localhost6
+              EOF
+
+              ##########################################################
+              # Install NGINX and Configure
+              ##########################################################
+              apt-get install -y nginx
+
+              mkdir -p /etc/nginx/sites-available/ /etc/nginx/sites-enabled/ || error_exit "Failed to create NGINX directories"
+
+              cat > '/etc/nginx/sites-available/esproxy.conf' << 'EOF'
+              server {
+                listen       80  default_server;
+
+                access_log /var/log/nginx/es_access.log;
+                error_log /var/log/nginx/es_error.log;
+
+                # Fixes issues with larger ES uploads
+                client_max_body_size 20M;
+
+                location / {
+
+                  # Pass requests to ElasticSearch
+                  proxy_pass https://${ELASTICURL};
+                  proxy_redirect off;
+
+                  proxy_set_header  X-Real-IP  $remote_addr;
+                  proxy_set_header  X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header  Host $http_host;
+                }
+              }
+
+              # Listen for local requests to the stub_status module.
+              server {
+                listen 127.0.0.1:9999;
+                location /nginx_status {
+                  stub_status on;
+                  access_log off;
+                  allow 127.0.0.1;
+                  deny all;
+                }
+              }
+              EOF
+
+              rm -f /etc/nginx/sites-enabled/default*
+              ln -s /etc/nginx/sites-available/esproxy.conf /etc/nginx/sites-enabled/esproxy.conf || error_exit "Failed to set Proxy Site to enabled"
+
+              systemctl enable nginx || error_exit "Failed to enable NGINX in systemctl"
+              systemctl restart nginx || error_exit "Failed to restart NGINX with systemctl"
+
+              ##########################################################
+              # NewRelic Config if Enabled
+              ##########################################################
+              ## No need to for error_exit here, it's exported and utilized inside the script
+              if [ -n "${NewRelicLicense}" ]; then
+                wget -qO /root/newrelic.sh 'https://github.com/HearstAT/cfn_backendless_chef/raw/${GitBranch}/newrelic.sh' && bash /root/newrelic.sh ${NewRelicLicense} ${NewRelicAppName}
+              fi
+
+              ##########################################################
+              # Sumologic Config if Enabled
+              ##########################################################
+              ## No need to for error_exit here, it's exported and utilized inside the script
+              if [ -n "${SumologicAccessID}" ]; then
+                wget -qO /root/sumologic.sh 'https://github.com/HearstAT/cfn_backendless_chef/raw/${GitBranch}/sumologic.sh' && bash /root/sumologic.sh proxy ${SumologicAccessID} ${SumologicAccessKey}
+              fi
+
+              ##########################################################
+              # Send Success Signal to CFN Wait Handle
+              ##########################################################
+
+              /usr/local/bin/cfn-signal -e 0 -r 'Server setup complete' "${ProxyWaitHandle}"
+
+            - { ELASTICURL: !GetAtt ElasticsearchDomain.DomainEndpoint }
+
+  ProxyEIPAssign:
+    Type: "AWS::EC2::EIPAssociation"
+    Properties:
+      EIP: !Ref ProxyEIP
+      InstanceId: !Ref ProxyInstance
+
+  ProxyWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+  ProxyWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: ProxyInstance
+    Properties:
+      Handle: !Ref ProxyWaitHandle
+      Timeout: 900

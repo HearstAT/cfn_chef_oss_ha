@@ -1,0 +1,758 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS HA Chef Server OSS - HA Backendless Chef - Ubuntu Xenial Based (20161214 AMI Build)
+
+Parameters:
+  ## Domain Configuration
+  HostedZone:
+    Type: String
+    Default: domain.com
+    Description: must match a route53 hosted domain/zone
+
+  SSLCertificateARN:
+    Type: String
+    Default: ''
+    Description: SSL Certficate ARN for SSL Certficate
+
+  ## Re-Deploy Configuration
+  RunUpgrade:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Select True/False if you wish to run chef upgrade procedures
+
+  BackupFilename:
+    Type: String
+    Default: ''
+    Description: Enter the backup file to restore (e.g.; backup_06_Dec_16.tar)
+
+  ExistingBucketName:
+    Type: String
+    Default: ''
+    Description: Enter a Existing Bucket Name to to use (Leave blank to create new)
+
+  DBSnapShot:
+    Type: String
+    Default: ''
+    Description: Enter ARN of DB Snapshot to Create Database From (Leave blank to create a fresh database)
+
+  ## Chef Configuration
+  ChefSubdomain:
+    Type: String
+    Default: chef-test
+    AllowedValues:
+      - chef-a
+      - chef-b
+      - chef-test
+    Description: subdomain/prefix that is combined with the hosted zone entered
+
+  ChefServerVersion:
+    Type: String
+    Default: "12.12.0"
+    AllowedValues:
+      - "12.12.0"
+      - "12.11.1"
+      - "12.11.0"
+      - "12.10.0"
+      - "12.9.1"
+      - "12.9.0"
+    Description: Choose Version of Chef Server to Install (All Supported/Tested Versions listed)
+
+  ## Database Configuration
+  DBUser:
+    Type: String
+    Default: ''
+    Description: Enter DB User Name (Required)
+
+  DBPassword:
+    Type: String
+    NoEcho: 'true'
+    Default: ''
+    Description: Enter DB Password (Required)
+
+  DBInstanceType:
+    Type: String
+    Default: db.t2.large
+    AllowedValues:
+      - db.t2.large
+      - db.m4.xlarge
+      - db.m4.2xlarge
+    ConstraintDescription: must be a valid Database instance type.
+
+  DBPublic:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Select True or False if you want your Database public facing (i.e.; if doing knife-ec-backup externally)
+
+  DBPublicCIDR:
+    Type: String
+    Default: ''
+    Description: Enter CIDR Range for Public Access (e.g.; 192.168.0.1/32, 172.33.0.0/16)
+
+  DBMultiAZ:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Select True or False for Multi Availability Zone DB Setup
+
+  DBURL:
+    Type: String
+    Default: ''
+    Description: Enter DB URL or VIP (External/Existing Only - Leave Empty to ignore)
+
+  ## Elasticsearch Configuration
+  ESProxyInstanceType:
+    Type: String
+    Default: t2.small
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t2.medium
+      - t2.large
+      - t2.xlarge
+      - t2.2xlarge
+      - m3.medium
+      - m3.large
+    ConstraintDescription: must be a valid EC2 instance type.
+  ElasticInstanceType:
+    Type: String
+    Default: t2.small.elasticsearch
+    AllowedValues:
+      - t2.small.elasticsearch
+      - t2.medium.elasticsearch
+      - m3.medium.elasticsearch
+      - m3.large.elasticsearch
+      - m3.xlarge.elasticsearch
+      - m3.2xlarge.elasticsearch
+    ConstraintDescription: must be a valid Elasticsearch instance type.
+
+  ElasticInstanceCount:
+    Type: String
+    Default: '2'
+    Description: Enter the number of ElasticSearch Instances/Nodes you wanted
+
+  ElasticReplicaCount:
+    Type: String
+    Default: '1'
+    Description: Enter the number of ElasticSearch Replicas you want (Must be at least one less than Instance count)
+
+  ## Mail Configuration
+  MailHost:
+    Type: String
+    Default: ''
+    Description: (Optional) Enter Mail Host; e.g.; smtp.mailgun.org
+
+  MailPort:
+    Type: String
+    Default: ''
+    Description: (Optional) Enter Port for Mail Host; e.g.; 587
+
+  MailCreds:
+    Type: String
+    NoEcho: 'true'
+    Default: ''
+    Description: (Optional) Enter Mail Credentials (e.g.; $username:$password)
+
+  ## New Relic Configuration
+  NewRelicAppName:
+    Type: String
+    Default: ''
+    Description: (Optional) Enter New Relic Application Name; e.g.; chef_ha_stack
+
+  NewRelicLicense:
+    Type: String
+    NoEcho: 'true'
+    Default: ''
+    Description: (Optional) Enter New Relic License Key
+
+  ## Sumologic Configuration
+  SumologicAccessID:
+    Type: String
+    NoEcho: 'true'
+    Default: ''
+    Description: (Optional) Enter Sumologic Access ID
+
+  SumologicAccessKey:
+    Type: String
+    NoEcho: 'true'
+    Default: ''
+    Description: (Optional) Enter Sumologic Access Key
+
+  ## Instance/Network Configuration
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+
+  SSHSecurityGroup:
+    Description: Select Security Group for SSH Access
+    Type: AWS::EC2::SecurityGroup::Id
+    Default: ''
+
+  ChefInstanceType:
+    Type: String
+    Default: c4.large
+    AllowedValues:
+      - c4.large
+      - m4.large
+      - c4.xlarge
+      - m4.xlarge
+      - c4.2xlarge
+    ConstraintDescription: must be a valid EC2 instance type.
+
+  ChefInstanceMaxCount:
+    Type: String
+    Default: '2'
+    Description: Set max number of instances to autoscale up to. (Note; +1 to any number here, 2 = 3 due to bootstrap instance being built)
+
+  ChefInstanceMinCount:
+    Type: String
+    Default: '1'
+    Description: Set minimum number of instances to run. (Note; 1 actually == 2 because of bootstrap instace)
+
+  VPC:
+    Description: Choose VPC to use
+    Type: AWS::EC2::VPC::Id
+    Default: ''
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+    -
+      Label:
+        default: Domain Configuration
+      Parameters:
+        - HostedZone
+        - SSLCertificateARN
+    -
+      Label:
+        default: Re-Deploy/Upgrade Options (Optional - Leave Blank to Disable)
+      Parameters:
+        - RunUpgrade
+        - BackupFilename
+        - ExistingBucketName
+        - DBSnapShot
+    -
+      Label:
+        default: Chef Configuration
+      Parameters:
+        - ChefSubdomain
+        - ChefServerVersion
+    -
+      Label:
+        default: Database Configuration
+      Parameters:
+        - DBUser
+        - DBPassword
+        - DBInstanceType
+        - DBPublic
+        - DBPublicCIDR
+        - DBMultiAZ
+        - DBURL
+    -
+      Label:
+        default: ElasticSearch Configuration
+      Parameters:
+        - ESProxyInstanceType
+        - ElasticInstanceType
+        - ElasticInstanceCount
+        - ElasticReplicaCount
+    -
+      Label:
+        default: Mail Configuration (Optional  - Leave Blank to Disable)
+      Parameters:
+        - MailCreds
+        - MailHost
+        - MailPort
+    -
+      Label:
+        default: New Relic Configuration (Optional - Leave Blank to Disable)
+      Parameters:
+        - NewRelicAppName
+        - NewRelicLicense
+    -
+      Label:
+        default: Sumologic Configuration (Optional  - Leave Blank to Disable)
+      Parameters:
+        - SumologicAccessID
+        - SumologicAccessKey
+    -
+      Label:
+        default: Instance & Network Configuration
+      Parameters:
+        - ChefInstanceType
+        - ChefInstanceMaxCount
+        - ChefInstanceMinCount
+        - KeyName
+        - VPC
+        - SSHSecurityGroup
+
+Conditions:
+  # Sets hardcoded options based on which domain is being created
+  # Avoids issues when doing blue/green deployment
+  ChefSubdomainCon:
+    !Equals [ !Ref ChefSubdomain, 'chef-a' ]
+  # Will create bucket for chef if no bucket entered for secrets
+  ChefBucketCon:
+    !Equals [ !Ref ExistingBucketName, '' ]
+  # Will create database if no exisitng URL is provided
+  DBCon:
+    !Equals [ !Ref DBURL, '' ]
+  # Set necessary items if Snapshot ID present
+  DBSnapCon:
+    !Equals [ !Ref DBSnapShot, '' ]
+  DBPublicTrue:
+    !Equals [ !Ref DBPublic, 'true' ]
+  DBPublicFalse:
+    !Equals [ !Ref DBPublic, 'false' ]
+
+Mappings:
+  RegionMap:
+    us-west-2:
+      HVM64: ami-b7a114d7
+    eu-west-1:
+      HVM64: ami-6f587e1c
+
+Resources:
+
+###############################################################################
+# Subnets
+###############################################################################
+
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      # Get Availability Zones and select First in string
+      AvailabilityZone: !Select [ 0, !GetAZs "" ]
+      # Selects subnet range based on Subdomain, avoids blue/green deployment failures
+      CidrBlock: !If [ ChefSubdomainCon, 172.33.10.0/24, 172.33.11.0/24 ]
+      Tags:
+        - Key: Name
+          Value: Public-Subnet-A
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Network
+          Value: "Public"
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      # Get Availability Zones and select Second in string
+      AvailabilityZone: !Select [ 1, !GetAZs "" ]
+      # Selects subnet range based on Subdomain, avoids blue/green deployment failures
+      CidrBlock: !If [ ChefSubdomainCon, 172.33.20.0/24, 172.33.21.0/24 ]
+      Tags:
+        - Key: Name
+          Value: Public-Subnet-B
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Network
+          Value: "Public"
+
+  SubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      # Get Availability Zones and select Third in string
+      AvailabilityZone: !Select [ 2, !GetAZs "" ]
+      # Selects subnet range based on Subdomain, avoids blue/green deployment failures
+      CidrBlock: !If [ ChefSubdomainCon, 172.33.30.0/24, 172.33.31.0/24 ]
+      Tags:
+        - Key: Name
+          Value: Public-Subnet-C
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Network
+          Value: "Public"
+
+  # Create the necessary subnet for RDS PostgreSQL
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Condition: DBCon
+    Properties:
+      DBSubnetGroupDescription: "Chef DB Subnet Group"
+      SubnetIds:
+          - !Ref SubnetA
+          - !Ref SubnetB
+          - !Ref SubnetC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ChefSubdomain} DB Subnet Group"
+
+###############################################################################
+# S3 Buckets
+###############################################################################
+
+  ChefBucket:
+    Type: AWS::S3::Bucket
+    # conditional look up, if true then creates this resource.
+    Condition: ChefBucketCon
+    DeletionPolicy: Retain
+    Properties:
+      AccessControl: Private
+
+###############################################################################
+# Security: IAM, Groups, Instance Profiles
+###############################################################################
+
+  ChefInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref ChefRole
+
+  ChefRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+
+  RolePolicies:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-ChefServer-Policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Allow all actions to one bucket (the supplied one, or the one you provided)
+          - Action: s3:*
+            Effect: Allow
+            Resource:
+              - !Join ['', [ 'arn:aws:s3:::', !If [ChefBucketCon, !Ref ChefBucket, !Ref ExistingBucketName] ]]
+              - !Join ['', [ 'arn:aws:s3:::', !If [ChefBucketCon, !Ref ChefBucket, !Ref ExistingBucketName], '/*' ]]
+          # Allow ability to list all buckets
+          - Action: s3:List*
+            Effect: Allow
+            Resource: arn:aws:s3:::*
+          # Allow instances to read their own tags (needed for setup script below)
+          - Action: ec2:DescribeTags
+            Effect: Allow
+            Resource: "*"
+      Roles:
+        - !Ref ChefRole
+
+  DBSecurityGroup:
+    Type: AWS::RDS::DBSecurityGroup
+    Condition: DBCon
+    Condition: DBPublicFalse
+    Properties:
+      EC2VpcId: !Ref VPC
+      DBSecurityGroupIngress:
+        - EC2SecurityGroupId: !Ref FrontendSecurityGroup
+      GroupDescription: "Chef Database Access Group"
+
+  DBSecurityGroupPublic:
+    Type: AWS::RDS::DBSecurityGroup
+    Condition: DBCon
+    Condition: DBPublicTrue
+    Properties:
+      EC2VpcId: !Ref VPC
+      DBSecurityGroupIngress:
+        - EC2SecurityGroupId: !Ref FrontendSecurityGroup
+        - CIRDIP: !Ref DBPublicCIDR
+      GroupDescription: "Chef Database Access Group w/ Public"
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Setup Ingress/Egress for Chef Frontend Load Balancer
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '443'
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: '0'
+          ToPort: '65535'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${ChefSubdomain}-ELB-SecurityGroup
+
+  FrontendSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Setup Ingress/Egress for Chef Frontend
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+        - IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '443'
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+        - IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '9090'
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '9090'
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          SourceSecurityGroupId: !Ref SSHSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: '0'
+          ToPort: '65535'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${ChefSubdomain}-Frontend-Security-Group
+
+  ProxySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Setup Ingress/Egress for Chef ES Proxy
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          SourceSecurityGroupId: !Ref FrontendSecurityGroup
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '80'
+          SourceSecurityGroupId: !Ref SSHSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: '0'
+          ToPort: '65535'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${ChefSubdomain}-Proxy-Security-Group
+
+###############################################################################
+# PostgreSQL DB
+###############################################################################
+
+  ChefDB:
+    Type: AWS::RDS::DBInstance
+    Condition: DBCon
+    DeletionPolicy: Snapshot
+    Properties:
+      DBName: !If [ DBSnapCon, 'chefdb', '' ]
+      AllocatedStorage: 50
+      DBInstanceIdentifier: !Sub ${ChefSubdomain}-db
+      MasterUsername: !Ref DBUser
+      MasterUserPassword: !Ref DBPassword
+      DBInstanceClass: !Ref DBInstanceType
+      DBSnapshotIdentifier: !Ref DBSnapShot
+      MonitoringInterval: 5
+      MultiAZ: !Ref DBMultiAZ
+      Engine: postgres
+      EngineVersion: 9.5.4
+      AutoMinorVersionUpgrade: true
+      BackupRetentionPeriod: 14
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBSecurityGroups:
+        - !Ref DBSecurityGroup
+      PubliclyAccessible: !If [ DBPublicTrue, true, false ]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-pgdb
+
+###############################################################################
+# ElasticSearch
+###############################################################################
+
+  ProxyEIP:
+    Type: "AWS::EC2::EIP"
+    Properties:
+      Domain: VPC
+
+  ElasticsearchDomain:
+    Type: AWS::Elasticsearch::Domain
+    DependsOn:
+      - ProxyEIP
+    Properties:
+      ElasticsearchVersion: 2.3
+      ElasticsearchClusterConfig:
+        InstanceCount: !Ref ElasticInstanceCount
+        ZoneAwarenessEnabled: false
+        InstanceType: !Ref ElasticInstanceType
+        DedicatedMasterEnabled: false
+      EBSOptions:
+        EBSEnabled: true
+        Iops: 0
+        VolumeSize: 20
+        VolumeType: gp2
+      SnapshotOptions:
+        AutomatedSnapshotStartHour: "0"
+      AccessPolicies:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal: "*"
+            Action: "es:*"
+            Condition:
+              IpAddress:
+                "aws:sourceIp": !Ref ProxyEIP
+      AdvancedOptions:
+        rest.action.multi.allow_explicit_index: "true"
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-ES
+
+###############################################################################
+# Elastic Search Proxy
+###############################################################################
+
+  ChefProxy:
+    Type: "AWS::CloudFormation::Stack"
+    DependsOn: !Ref ElasticsearchDomain
+    Properties:
+      Parameters:
+        ImageID: !FindInMap [ RegionMap, !Ref "AWS::Region", HVM64 ]
+        HostedZone: !Ref HostedZone
+        SSLCertificateARN: !Ref
+        RunUpgrade: !Ref RunUpgrade
+        BackupFilename: !Ref BackupFilename
+        ExistingBucketName: !Ref ExistingBucketName
+        DBSnapShot: !Ref DBSnapShot
+        ChefSubdomain: !Ref ChefSubdomain
+        ChefServerVersion: !Ref ChefServerVersion
+        ManageVersion: !Ref ManageVersion
+        ReportingVersion: !Ref ReportingVersion
+        DisableSignup: !Ref DisableSignup
+        LicenseCount: !Ref LicenseCount
+        SupportEmail: !Ref SupportEmail
+        DBUser: !Ref DBUser
+        DBPassword: !Ref DBPassword
+        DBInstanceType: !Ref DBInstanceType
+        DBPublic: !Ref DBPublic
+        DBPublicCIDR: !Ref DBPublicCIDR
+        DBMultiAZ: !Ref DBMultiAZ
+        DBURL: !Ref DBURL
+        ESProxyInstanceType: !Ref ESProxyInstanceType
+        ElasticInstanceType: !Ref ElasticInstanceType
+        ElasticInstanceCount: !Ref ElasticInstanceCount
+        ElasticReplicaCount: !Ref ElasticReplicaCount
+        MailHost: !Ref MailHost
+        MailPort: !Ref MailPort
+        MailCreds: !Ref MailCreds
+        NewRelicAppName: !Ref NewRelicAppName
+        NewRelicLicense: !Ref NewRelicLicense
+        SumologicAccessID: !Ref SumologicAccessID
+        SumologicAccessKey: !Ref SumologicAccessKey
+        KeyName: !Ref KeyName
+        SSHSecurityGroup: !Ref SSHSecurityGroup
+        VPC: !Ref VPC
+      TemplateURL: String
+      TimeoutInMinutes: 10
+
+###############################################################################
+# Chef Server
+###############################################################################
+
+###############################################################################
+## LoadBalancer and DNS
+###############################################################################
+
+  PrimaryElasticLoadBalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      CrossZone: true
+      HealthCheck:
+        HealthyThreshold: '2'
+        Interval: '90'
+        Target: HTTP:80/_status
+        Timeout: '60'
+        UnhealthyThreshold: '10'
+      Subnets:
+        - !Ref SubnetA
+        - !Ref SubnetB
+        - !Ref SubnetC
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      LBCookieStickinessPolicy:
+        - PolicyName: PublicELBCookieStickinessPolicy
+          CookieExpirationPeriod: '3600'
+      Listeners:
+        - InstancePort: '80'
+          LoadBalancerPort: '443'
+          InstanceProtocol: HTTP
+          Protocol: HTTPS
+          PolicyNames:
+            - PublicELBCookieStickinessPolicy
+          SSLCertificateId: !Ref SSLCertificateARN
+      Tags:
+        - Key: Name
+          Value: !Sub ${ChefSubdomain}-ELB
+
+  ChefDNS:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Sub "${HostedZone}."
+      Comment: !Sub Zone apex alias targeted to ${ChefSubdomain} ELB.
+      RecordSets:
+          # Create DNS A Record by joining ChefSubdomain + HostedZone
+        - Name: !Join [ '', [ !Ref ChefSubdomain, ".", !Ref HostedZone, "." ] ]
+          Type: A
+          AliasTarget:
+            HostedZoneId: !GetAtt PrimaryElasticLoadBalancer.CanonicalHostedZoneNameID
+            DNSName: !GetAtt PrimaryElasticLoadBalancer.CanonicalHostedZoneName
+
+  ChefServer:
+    Type: "AWS::CloudFormation::Stack"
+    DependsOn: !Ref ChefProxy
+    DependsOn: !Ref ChefDB
+    Properties:
+      Parameters:
+        ImageID: !FindInMap [ RegionMap, !Ref "AWS::Region", HVM64 ]
+        HostedZone: !Ref HostedZone
+        LoadBalancer: !Ref PrimaryElasticLoadBalancer
+        RunUpgrade: !Ref RunUpgrade
+        BackupFilename: !Ref BackupFilename
+        BucketName: !If [ ChefBucketCon, !Ref ChefBucket, !Ref ExistingBucketName ]
+        DBSnapShot: !Ref DBSnapShot
+        ChefSubdomain: !Ref ChefSubdomain
+        ChefServerVersion: !Ref ChefServerVersion
+        DBUser: !Ref DBUser
+        DBPassword: !Ref DBPassword
+        ProxyIP: !GetAtt ProxyInstance.PrivateIp
+        DBURL: !If [ DBCon, !GetAtt ChefDB.Endpoint.Address, !Ref DBURL ]
+        MailHost: !Ref MailHost
+        MailPort: !Ref MailPort
+        MailCreds: !Ref MailCreds
+        NewRelicAppName: !Ref NewRelicAppName
+        NewRelicLicense: !Ref NewRelicLicense
+        SumologicAccessID: !Ref SumologicAccessID
+        SumologicAccessKey: !Ref SumologicAccessKey
+        KeyName: !Ref KeyName
+        Subnets: !Sub "${SubnetA},${SubnetB},${SubnetC}"
+        SSHSecurityGroup: !Ref SSHSecurityGroup
+        ChefInstanceType: !Ref ChefInstanceType
+        ChefInstanceMaxCount: !Ref ChefInstanceMaxCount
+        ChefInstanceMinCount: !Ref ChefInstanceMinCount
+      TemplateURL: String
+      TimeoutInMinutes: 25
